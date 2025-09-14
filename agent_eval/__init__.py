@@ -1,9 +1,13 @@
 """Agent-Eval: LLM Agent Evaluation Framework"""
 
-from .agent import Agent
-from .evaluator import Evaluator
-from .judge import Judge
-from .tools import AVAILABLE_TOOLS
+# Core components (to be implemented)
+# from .agent import Agent
+# from .evaluator import Evaluator
+# from .judge import Judge
+
+# Tool system
+from .tool_discovery import discover_tools
+from .tools import Tool
 
 __version__ = "0.1.0"
-__all__ = ["Agent", "Evaluator", "Judge", "AVAILABLE_TOOLS"]
+__all__ = ["discover_tools", "Tool"]
