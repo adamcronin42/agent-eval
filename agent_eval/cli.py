@@ -4,8 +4,20 @@ CLI interface for agent-eval framework.
 
 import click
 import os
+import sys
+import json
+import time
 from pathlib import Path
 from dotenv import load_dotenv
+from datetime import datetime
+import colorama
+from colorama import Fore, Style
+from tabulate import tabulate
+try:
+    # built into python for unix/linux/macOs but not available on Windows
+    import readline
+except ImportError:
+    readline = None
 
 
 def get_tool_template(tool_name: str, class_name: str) -> str:
@@ -52,10 +64,206 @@ class {class_name}(Tool):
 '''
 
 
+def init_colorama():
+    """Initialize colorama for cross-platform colored output."""
+    colorama.init(autoreset=True)
+
+
+def print_banner():
+    """Print the agent-eval banner."""
+    print(f"{Fore.CYAN}{Style.BRIGHT}")
+    print("╔══════════════════════════════════════╗")
+    print("║           🤖 Agent-Eval              ║")
+    print("║    LLM Agent Evaluation Framework    ║")
+    print("╚══════════════════════════════════════╝")
+    print(f"{Style.RESET_ALL}")
+
+
+def format_metrics(metrics):
+    """Format agent metrics for display."""
+    if not metrics:
+        return ""
+
+    duration = ""
+    if metrics.get("start_time") and metrics.get("end_time"):
+        duration = f"{metrics['end_time'] - metrics['start_time']:.2f}s"
+
+    return f"{Fore.YELLOW}📊 Tokens: {metrics.get('total_tokens', 0)} | Tools: {metrics.get('tool_calls', 0)} | Iterations: {metrics.get('iterations', 0)}{f' | Time: {duration}' if duration else ''}{Style.RESET_ALL}"
+
+
+def save_conversation(agent, conversation_dir="conversation_history"):
+    """Save conversation to organized directory structure."""
+    # Create conversation directory if it doesn't exist
+    Path(conversation_dir).mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"conversation_{timestamp}.json"
+    filepath = Path(conversation_dir) / filename
+
+    conversation_data = {
+        'conversation_history': agent.conversation_history,
+        'metrics': agent.get_metrics(),
+        'timestamp': timestamp,
+        'model': agent.model_name,
+        'tools_available': agent.get_available_tools()
+    }
+
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(conversation_data, f, indent=2)
+        return filepath
+    except Exception as e:
+        raise Exception(f"Failed to save conversation: {e}")
+
+
 @click.group()
 def cli():
     """Agent-Eval: LLM Agent Evaluation Framework"""
     load_dotenv()  # Always load .env on CLI start
+    init_colorama()
+
+
+@cli.command()
+@click.option("--model", "-m", help="Override model name")
+@click.option("--system-prompt", "-s", help="Override system prompt")
+@click.option("--max-iterations", "-i", type=int, help="Maximum iterations")
+@click.option("--auto-approve", "-y", is_flag=True, help="Auto-approve tools")
+def chat(model, system_prompt, max_iterations, auto_approve):
+    """Start interactive REPL mode for chatting with the agent."""
+    try:
+        from agent_eval.agent import Agent
+
+        # Initialize agent
+        click.echo(f"{Fore.GREEN}🚀 Initializing agent...{Style.RESET_ALL}")
+        agent = Agent(model_name=model, system_prompt=system_prompt)
+
+        if max_iterations:
+            agent.max_iterations = max_iterations
+        if auto_approve:
+            agent.auto_approve_tools = True
+
+        print_banner()
+        click.echo(f"Model: {Fore.CYAN}{agent.model_name}{Style.RESET_ALL}")
+        tools_list = agent.get_available_tools()
+        click.echo(f"Tools: {Fore.YELLOW}{', '.join(tools_list)}{Style.RESET_ALL}")
+        auto_status = "Yes" if agent.auto_approve_tools else "No"
+        color = Fore.GREEN if agent.auto_approve_tools else Fore.RED
+        click.echo(f"Auto-approve: {color}{auto_status}{Style.RESET_ALL}")
+        click.echo(f"\n{Fore.GREEN}💬 Ready! Type '/help' for commands{Style.RESET_ALL}\n")
+
+        # REPL loop
+        while True:
+            try:
+                user_input = input(f"{Fore.BLUE}You: {Style.RESET_ALL}").strip()
+
+                if not user_input:
+                    continue
+
+                # Handle special commands
+                if user_input.lower() in ['exit', 'quit']:
+                    break
+                elif user_input == '/help':
+                    click.echo(f"\n{Fore.CYAN}Available commands:{Style.RESET_ALL}")
+                    click.echo("  /help     - Show this help")
+                    click.echo("  /clear    - Clear conversation history")
+                    click.echo("  /metrics  - Show current metrics")
+                    click.echo("  /tools    - List available tools")
+                    click.echo("  /save     - Save conversation to file")
+                    click.echo("  exit/quit - Exit the REPL\n")
+                    continue
+                elif user_input == '/clear':
+                    agent.reset_conversation()
+                    click.echo(f"{Fore.GREEN}✓ Conversation cleared{Style.RESET_ALL}\n")
+                    continue
+                elif user_input == '/metrics':
+                    click.echo(f"\n{format_metrics(agent.get_metrics())}\n")
+                    continue
+                elif user_input == '/tools':
+                    tools = agent.get_available_tools()
+                    click.echo(f"\n{Fore.CYAN}Available tools ({len(tools)}):{Style.RESET_ALL}")
+                    for tool in tools:
+                        click.echo(f"  • {tool}")
+                    click.echo()
+                    continue
+                elif user_input == '/save':
+                    try:
+                        filepath = save_conversation(agent)
+                        click.echo(f"{Fore.GREEN}✓ Saved to {filepath}{Style.RESET_ALL}\n")
+                    except Exception as e:
+                        click.echo(f"{Fore.RED}✗ {e}{Style.RESET_ALL}\n")
+                    continue
+
+                # Process agent query
+                click.echo(f"{Fore.GREEN}🤖 Agent: {Style.RESET_ALL}", nl=False)
+                result = agent.run(user_input)
+
+                # Display response
+                response = result.get('response', 'No response')
+                click.echo(response)
+
+                # Show metrics and tools
+                metrics_display = format_metrics(result.get('metrics', {}))
+                if metrics_display:
+                    click.echo(f"\n{metrics_display}")
+
+                tools_used = result.get('tools_used', [])
+                if tools_used:
+                    tools_str = ', '.join(set(tools_used))
+                    click.echo(f"{Fore.MAGENTA}🔧 Tools: {tools_str}{Style.RESET_ALL}")
+
+                click.echo()  # Add spacing
+
+            except KeyboardInterrupt:
+                click.echo(f"\n{Fore.YELLOW}👋 Goodbye!{Style.RESET_ALL}")
+                break
+            except EOFError:
+                click.echo(f"\n{Fore.YELLOW}👋 Goodbye!{Style.RESET_ALL}")
+                break
+            except Exception as e:
+                click.echo(f"{Fore.RED}✗ Error: {e}{Style.RESET_ALL}\n")
+
+    except Exception as e:
+        click.echo(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--model", "-m", help="Override model name")
+@click.option("--system-prompt", "-s", help="Override system prompt")
+@click.option("--max-iterations", "-i", type=int, help="Maximum iterations")
+@click.option("--auto-approve", "-y", is_flag=True, help="Auto-approve tools")
+@click.option("--output", "-o", type=click.Choice(['text', 'json']), default='text')
+def run(query, model, system_prompt, max_iterations, auto_approve, output):
+    """Execute a single query with the agent."""
+    try:
+        from agent_eval.agent import Agent
+
+        agent = Agent(model_name=model, system_prompt=system_prompt)
+
+        if max_iterations:
+            agent.max_iterations = max_iterations
+        if auto_approve:
+            agent.auto_approve_tools = True
+
+        result = agent.run(query)
+
+        if output == 'json':
+            click.echo(json.dumps(result, indent=2))
+        else:
+            response = result.get('response', 'No response')
+            click.echo(f"{Fore.GREEN}🤖 Response:{Style.RESET_ALL}\n{response}")
+
+            metrics_display = format_metrics(result.get('metrics', {}))
+            if metrics_display:
+                click.echo(f"\n{metrics_display}")
+
+            tools_used = result.get('tools_used', [])
+            if tools_used:
+                tools_str = ', '.join(set(tools_used))
+                click.echo(f"\n{Fore.MAGENTA}🔧 Tools: {tools_str}{Style.RESET_ALL}")
+
+    except Exception as e:
+        click.echo(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
 
 
 @cli.command("create-tool")
